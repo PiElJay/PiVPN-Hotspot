@@ -1,102 +1,205 @@
-📌 Raspberry Pi - WiFi Access Point & WireGuard VPN Gateway
-🚀 Overview
+📖 Raspberry Pi Wi-Fi Access Point + WireGuard VPN (Full Tunnel)
 
-This script transforms a Raspberry Pi into a secure, self-hosted Wi-Fi access point that routes all connected devices' traffic through a WireGuard VPN tunnel.
+This project configures a Raspberry Pi as: ✅ A Wi-Fi Access Point (AP) on wlan0, allowing devices to connect.
+✅ A WireGuard VPN Client, routing all traffic through a remote VPS.
+✅ A NAT Gateway, forwarding all connected devices' traffic through the VPN.
 
-🔹 Key Features:
-✅ Wi-Fi Access Point (AP) on wlan0, allowing devices to connect
-✅ WireGuard VPN Client, routing all outgoing traffic via a VPS
-✅ NAT Gateway, forwarding traffic from connected devices through the VPN
-✅ Automatic VPN Failover, with a watchdog script to restart WireGuard if it fails
+The result? Any device connecting to the Raspberry Pi’s Wi-Fi network will have its traffic routed securely through the VPN, appearing as if browsing from the remote VPS.
 
-This setup is perfect for situations where you want to:
+📌 Use Cases
 
-    Secure your internet traffic while using public Wi-Fi
-    Bypass geo-restrictions by routing traffic through your VPS
-    Provide VPN access to all devices without setting up VPN clients on each one
+This setup is perfect for:
 
-📖 Setup Instructions
-1️⃣ Prerequisites
+✅ Personal VPN Gateway – A self-hosted, secure VPN for complete control. (Note: Since you use a fixed VPS IP, this does not provide anonymity like Tor or rotating VPN services.)
 
-Before running the script, ensure:
+✅ Remote Work Freedom – Need to appear in another country for work but can’t physically move? Route your traffic through a remote VPS, bypassing restrictions without the "proxy/VPN detected" issues of commercial VPNs like NordVPN.
 
-    Your Raspberry Pi is running Raspberry Pi OS (Debian-based)
-    You are connected via Ethernet (eth0), as wlan0 will become the Access Point
-    You have a WireGuard VPN set up on a VPS (Ubuntu/Debian recommended)
+✅ Bypassing Geo-Restrictions – Access content and services as if you were in another country without relying on centralized VPN providers.
 
-2️⃣ Update the Configuration
+✅ IoT & Home Security – Securely connect smart home devices to a trusted network, even when you're away.
 
-Before executing the script, update the following critical parameters inside /etc/wireguard/wg0.conf:
-Parameter	Description	Example
-PrivateKey	Raspberry Pi’s WireGuard private key	(Generated on the Pi)
-PublicKey	VPS WireGuard public key	/HNPw2YYc9QuRV...TQ4=
-Endpoint	VPS Public IP + WireGuard Port	209.227.234.177:51820
-AllowedIPs	Route all traffic through VPN	0.0.0.0/0
-DNS	VPN's DNS server (Google in this case)	8.8.8.8
-3️⃣ Run the Script
+✅ Secure Public Wi-Fi – When traveling, connect to the Raspberry Pi’s Wi-Fi AP and ensure all traffic is encrypted via WireGuard.
 
-    Clone or Download the script:
+✅ Encrypt traffic from untrusted networks (hotels, public Wi-Fi).
 
-git clone https://github.com/yourusername/rpi-vpn-ap.git
-cd rpi-vpn-ap
+🛠 Setup Overview
+🔹 Server (VPS) Setup:
 
-Make it executable and run it as root:
+    Runs Ubuntu 24.04 (Noble).
+    Uses WireGuard VPN to accept client connections.
+    Uses UFW (Uncomplicated Firewall) to handle NAT and security.
+    Forwards all VPN traffic through the VPS’s internet connection.
 
-    chmod +x setup_rpi_vpn.sh
-    sudo ./setup_rpi_vpn.sh
+🔹 Raspberry Pi Setup:
 
-    The script will:
-        Update the system and install required packages
-        Configure Wi-Fi AP & DHCP using hostapd and dnsmasq
-        Enable IP forwarding & configure iptables for proper routing
-        Set up and enable WireGuard
-        Deploy a VPN watchdog to auto-restart the VPN if it fails
+    Runs Raspberry Pi OS (Bookworm).
+    Creates a Wi-Fi Access Point (AP).
+    Connects to the VPS via WireGuard VPN.
+    Performs NAT forwarding, allowing connected devices to browse securely through the VPN.
 
-    After execution, the Raspberry Pi will automatically reboot.
+🚀 Installation Guide
+1️⃣ VPS (WireGuard Server) Setup
 
-📡 How to Connect to the Wi-Fi Access Point
+On your Ubuntu 24.04 VPS, execute:
 
-    SSID: MySecureAP (Change in /etc/hostapd/hostapd.conf)
-    Password: ChangeThisPassword!
-    DHCP Range: 192.168.50.10 - 192.168.50.150
+wget https://raw.githubusercontent.com/PiElJau/wg_server_setup.sh -O wg_server_setup.sh
+chmod +x wg_server_setup.sh
+sudo ./wg_server_setup.sh
 
-Once connected, all traffic will be routed securely through the VPN.
-🛠 Troubleshooting
+➡️ Important Notes for the VPS:
 
-1️⃣ Check VPN Status
+📌 The script will:
 
-systemctl status wg-quick@wg0
-journalctl -u wg-quick@wg0 --no-pager | tail -20
+    Install WireGuard & UFW.
+    Configure NAT & IP forwarding.
+    Generate WireGuard keys.
+    Create a default WireGuard config (/etc/wireguard/wg0.conf).
+    Start WireGuard and enable a watchdog to monitor connections.
+    
+IMPORTANT:
+🔑 After completion, note the VPS Public Key (displayed at the end of the script).
+You'll need this when configuring the Raspberry Pi.
+---------
+2️⃣ Raspberry Pi (Client + AP) Setup
 
-2️⃣ Check IP Forwarding
+On your Raspberry Pi, execute:
+
+wget https://raw.githubusercontent.com/PiElJay/setup_rpi_vpn.sh -O setup_rpi_vpn.sh
+chmod +x setup_rpi_vpn.sh
+sudo ./setup_rpi_vpn.sh
+
+➡️ Important Notes for the Raspberry Pi:
+
+📌 The script will:
+
+    Set up a Wi-Fi Access Point using hostapd & dnsmasq.
+    Install WireGuard and configure it to connect to the VPS.
+    Enable IP forwarding & NAT, so connected devices can browse through the VPN.
+    Persist firewall rules using iptables-persistent.
+    Enable a watchdog to restart WireGuard if the connection drops.
+
+⚙️ Configuration Details
+📌 WireGuard Configurations
+🔹 VPS (/etc/wireguard/wg0.conf on the server)
+
+Replace <CLIENT_PUBLIC_KEY> with the key from the Raspberry Pi:
+
+[Interface]
+Address = 10.0.0.1/24
+ListenPort = 51820
+PrivateKey = <SERVER_PRIVATE_KEY>
+
+[Peer]
+PublicKey = <CLIENT_PUBLIC_KEY>
+AllowedIPs = 10.0.0.2/32
+
+🔹 Raspberry Pi (/etc/wireguard/wg0.conf on the Pi)
+
+Replace <SERVER_PUBLIC_KEY> and <VPS_IP>:
+
+[Interface]
+PrivateKey = <CLIENT_PRIVATE_KEY>
+Address = 10.0.0.2/24
+DNS = 8.8.8.8
+
+[Peer]
+PublicKey = <SERVER_PUBLIC_KEY>
+Endpoint = <VPS_IP>:51820
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = 25
+
+📡 Wi-Fi Access Point Configuration
+
+The Raspberry Pi’s Wi-Fi AP settings are stored in:
+
+    SSID & Password: /etc/hostapd/hostapd.conf
+    DHCP & DNS settings: /etc/dnsmasq.conf
+
+To change the Wi-Fi name (SSID) and password, edit:
+
+sudo nano /etc/hostapd/hostapd.conf
+
+Example:
+
+ssid=SecureVPN-WiFi
+wpa_passphrase=MyStrongPassword!
+
+Save and restart:
+
+sudo systemctl restart hostapd
+
+📌 Firewall & NAT Configuration
+
+Both VPS & Raspberry Pi use NAT (Masquerading) to forward traffic.
+🔹 VPS Firewall (UFW)
+
+Run:
+
+sudo ufw status verbose
+
+Expected output:
+
+To                         Action      From
+--                         ------      ----
+51820/udp                  ALLOW       Anywhere
+22/tcp                     ALLOW       Anywhere
+
+🔹 Raspberry Pi Firewall (iptables)
+
+Check:
+
+sudo iptables -t nat -L -v
+
+Expected rules:
+
+Chain POSTROUTING (policy ACCEPT)
+ pkts bytes target     prot opt in  out   source          destination
+ 0     0 MASQUERADE  all  --  any  eth0  10.0.0.0/24     anywhere
+ 0     0 MASQUERADE  all  --  any  eth0  192.168.50.0/24 anywhere
+
+🔍 Troubleshooting
+❌ No Internet on Connected Devices?
+
+1️⃣ Check IP Forwarding:
 
 sysctl net.ipv4.ip_forward
 
-✔ Output should be: net.ipv4.ip_forward = 1
+If it's 0, enable it:
 
-3️⃣ Verify iptables NAT Rules
+echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-ip_forward.conf
+sysctl --system
+
+2️⃣ Verify VPN Connection on the Raspberry Pi:
+
+wg show
+
+Should display a handshake.
+
+3️⃣ Check NAT Rules:
 
 iptables -t nat -L -v
 
-4️⃣ Test VPN Connectivity
+Ensure POSTROUTING MASQUERADE is applied.
+🎯 Next Steps
 
-curl -4 ifconfig.me
+🔹 Enhance security: Change the Wi-Fi password (hostapd.conf).
+🔹 Add more clients: Add more [Peer] sections in the VPS wg0.conf.
+🔹 Monitor VPN uptime: Use wg-watchdog to auto-restart WireGuard.
+📜 License
 
-✔ If this shows your VPS IP, the VPN is working correctly.
-📌 Notes & Customization
+📌 MIT License – Feel free to modify, distribute, and improve!
+📢 Credits
 
-    Change the Wi-Fi SSID & password inside /etc/hostapd/hostapd.conf
-    If using a different VPN provider, adjust WireGuard settings in /etc/wireguard/wg0.conf
-    To disable the VPN failover script, remove the cron job with:
+    WireGuard: Lightweight and secure VPN technology.
+    Raspberry Pi Foundation: For the amazing Raspberry Pi ecosystem.
+    UFW (Uncomplicated Firewall): Simple yet powerful firewall tool.
 
-    crontab -e
+🎉 Enjoy Secure Browsing via Your Own VPN Access Point! 🚀
+🔗 GitHub Repository Link:
+https://github.com/PiElJay/Tunnel-Gateway
 
-    and delete the line with vpn-watchdog
+🌍 Global Impact
 
-📜 Credits & License
-
-Developed by [Your Name] - Feel free to contribute and improve! 🚀
-Licensed under MIT License – Open-source and free to use.
-
-Now you have a plug-and-play Raspberry Pi VPN Access Point! 🎉 🔥
-Let me know if you need any final tweaks! 🚀
+If you like it, give it a ⭐ on GitHub! 🚀
+Found an issue? Open an issue or PR to improve it!
+This is basilar script, it must need to be improved on security
