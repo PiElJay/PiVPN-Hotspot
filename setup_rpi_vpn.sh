@@ -6,10 +6,10 @@ set -euo pipefail
 # ---------------------------------------------------------------------------- #
 # This script turns a Raspberry Pi into:                                       #
 # - A Wi-Fi Access Point (AP) on wlan0                                         #
-# - A VPN client, routing all traffic through a WireGuard VPS                  #
-# - A NAT Gateway for forwarding traffic from connected devices                #
+# - A VPN client, routing all traffic through a WireGuard VPS                 #
+# - A NAT Gateway for forwarding traffic from connected devices               #
 # ---------------------------------------------------------------------------- #
-# After execution, the Raspberry Pi will reboot.                               #
+# The script will ask for necessary inputs before execution.                   #
 ################################################################################
 
 # Ensure script runs as root
@@ -18,67 +18,83 @@ if [[ $(id -u) -ne 0 ]]; then
   exit 1
 fi
 
-echo "[INFO] Updating system and installing required packages..."
-apt update && apt full-upgrade -y
-apt install -y git curl hostapd dnsmasq wireguard
+################################################################################
+# 1. USER INPUTS                                                               #
+################################################################################
 
-# Install iptables and openresolv if missing
-if ! command -v iptables &> /dev/null; then
-  echo "[INFO] Installing iptables..."
-  apt install -y iptables iptables-persistent
-fi
+echo "==============================================="
+echo "  🛠️  Raspberry Pi VPN Access Point Setup     "
+echo "==============================================="
+echo ""
 
-if ! command -v resolvconf &> /dev/null; then
-  echo "[INFO] Installing openresolv (resolvconf)..."
-  apt install -y openresolv
+# Ask for VPN settings
+read -rp "Enter your WireGuard Server Public Key: " WG_SERVER_PUBKEY
+read -rp "Enter your WireGuard Server IP (e.g., 209.227.234.177:51820): " WG_SERVER_IP
+read -rp "Enter VPN subnet (default 10.0.0.0/24): " VPN_SUBNET
+VPN_SUBNET=${VPN_SUBNET:-10.0.0.0/24}
+
+# Ask for Wi-Fi settings
+read -rp "Enter Wi-Fi SSID (e.g., MySecureAP): " WIFI_SSID
+read -rp "Enter Wi-Fi Password: " WIFI_PASS
+
+# Set VPN client IP (calculated from subnet)
+VPN_CLIENT_IP=$(echo "$VPN_SUBNET" | sed 's/0\/24/2/')
+
+echo ""
+echo "📌 Configuration Summary:"
+echo "-----------------------------------------------"
+echo "🔹 WireGuard Server Public Key: $WG_SERVER_PUBKEY"
+echo "🔹 WireGuard Server IP: $WG_SERVER_IP"
+echo "🔹 VPN Subnet: $VPN_SUBNET"
+echo "🔹 VPN Client IP: $VPN_CLIENT_IP"
+echo "🔹 Wi-Fi SSID: $WIFI_SSID"
+echo "🔹 Wi-Fi Password: $WIFI_PASS"
+echo "-----------------------------------------------"
+
+read -rp "⚠️  Continue with these settings? (y/n): " CONFIRM
+if [[ $CONFIRM != "y" ]]; then
+  echo "[INFO] Exiting..."
+  exit 1
 fi
 
 ################################################################################
-# 1. SYSTEM CONFIGURATION (HOSTNAME & WIFI COUNTRY)                            #
+# 2. INSTALL REQUIRED PACKAGES                                                 #
+################################################################################
+
+echo "[INFO] Updating system and installing required packages..."
+apt update && apt full-upgrade -y
+apt install -y git curl hostapd dnsmasq wireguard iptables-persistent
+
+################################################################################
+# 3. SYSTEM CONFIGURATION                                                      #
 ################################################################################
 
 echo "[INFO] Setting hostname and Wi-Fi country..."
 hostnamectl set-hostname raspberry-vpn
 echo "raspberry-vpn" > /etc/hostname
 echo "127.0.1.1 raspberry-vpn" >> /etc/hosts
-
-# Set Wi-Fi country
 echo "country=FR" >> /etc/wpa_supplicant/wpa_supplicant.conf
 
 ################################################################################
-# 2. SET STATIC IP ON WLAN0                                                    #
-################################################################################
-
-echo "[INFO] Setting static IP for wlan0..."
-cat <<EOF > /etc/dhcpcd.conf
-interface wlan0
-    static ip_address=192.168.50.1/24
-    nohook wpa_supplicant
-EOF
-
-################################################################################
-# 3. CONFIGURE WI-FI ACCESS POINT                                              #
+# 4. CONFIGURE WI-FI ACCESS POINT                                              #
 ################################################################################
 
 echo "[INFO] Configuring Wi-Fi Access Point..."
 systemctl unmask hostapd
 systemctl enable hostapd
 
-# Configure hostapd (Wi-Fi AP settings)
 cat <<EOF > /etc/hostapd/hostapd.conf
 interface=wlan0
-ssid=MySecureAP
+ssid=$WIFI_SSID
 hw_mode=g
 channel=6
 wpa=2
-wpa_passphrase=ChangeThisPassword!
+wpa_passphrase=$WIFI_PASS
 wpa_key_mgmt=WPA-PSK
 rsn_pairwise=CCMP
 country_code=FR
 EOF
 
-# Configure dnsmasq (DHCP for AP clients)
-mv /etc/dnsmasq.conf /etc/dnsmasq.conf.bak || true
 cat <<EOF > /etc/dnsmasq.conf
 interface=wlan0
 dhcp-range=192.168.50.10,192.168.50.150,255.255.255.0,24h
@@ -87,30 +103,28 @@ dhcp-option=6,8.8.8.8,1.1.1.1
 EOF
 
 ################################################################################
-# 4. ENABLE NAT & IP FORWARDING                                                #
+# 5. ENABLE NAT, IP FORWARDING & IPTABLES RULES                                #
 ################################################################################
 
 echo "[INFO] Enabling IP forwarding and setting iptables rules..."
 echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-ip_forward.conf
 sysctl --system
 
-# Set iptables rules for NAT
-iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+iptables -t nat -A POSTROUTING -s 192.168.50.0/24 -o eth0 -j MASQUERADE
+iptables -t nat -A POSTROUTING -s 192.168.50.0/24 -o wg0 -j MASQUERADE
 iptables -A FORWARD -i wlan0 -o eth0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+iptables -A FORWARD -i wlan0 -o wg0 -m state --state RELATED,ESTABLISHED -j ACCEPT
 iptables -A FORWARD -i eth0 -o wlan0 -j ACCEPT
+iptables -A FORWARD -i wg0 -o wlan0 -j ACCEPT
 
-# Save iptables rules
-iptables-save > /etc/iptables.up.rules
+iptables-save > /etc/iptables/rules.v4
+ip6tables-save > /etc/iptables/rules.v6
 
-# Restore iptables on boot
-cat <<EOF > /etc/network/if-pre-up.d/iptables
-#!/bin/sh
-/sbin/iptables-restore < /etc/iptables.up.rules
-EOF
-chmod +x /etc/network/if-pre-up.d/iptables
+systemctl enable netfilter-persistent
+netfilter-persistent save
 
 ################################################################################
-# 5. CONFIGURE WIREGUARD CLIENT                                                #
+# 6. CONFIGURE WIREGUARD CLIENT                                                #
 ################################################################################
 
 echo "[INFO] Configuring WireGuard client..."
@@ -127,12 +141,12 @@ CLIENT_PRIVATE_KEY="$(cat client_private.key)"
 cat <<EOF > /etc/wireguard/wg0.conf
 [Interface]
 PrivateKey = $CLIENT_PRIVATE_KEY
-Address = 10.0.0.2/24
+Address = $VPN_CLIENT_IP/24
 DNS = 8.8.8.8
 
 [Peer]
-PublicKey = ReplaceWithYourVPSPublicKey
-Endpoint = ReplaceWithYourVPSIP:51820
+PublicKey = $WG_SERVER_PUBKEY
+Endpoint = $WG_SERVER_IP
 AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25
 EOF
@@ -140,221 +154,7 @@ EOF
 chmod 600 /etc/wireguard/wg0.conf
 
 ################################################################################
-# 6. ENABLE SERVICES                                                           #
-################################################################################
-
-echo "[INFO] Enabling and starting services..."
-systemctl enable dnsmasq
-systemctl enable hostapd
-systemctl restart dnsmasq
-systemctl restart hostapd
-
-# Enable and start WireGuard
-systemctl enable wg-quick@wg0
-systemctl start wg-quick@wg0
-
-################################################################################
-# 7. VPN WATCHDOG (AUTO-RESTART VPN IF DOWN)                                   #
-################################################################################
-
-echo "[INFO] Creating VPN watchdog script..."
-cat <<EOF > /usr/local/bin/vpn-watchdog
-#!/bin/bash
-if ! ping -c 3 10.0.0.1 &> /dev/null; then
-    systemctl restart wg-quick@wg0
-    logger "VPN Watchdog: Tunnel restarted"
-fi
-EOF
-chmod +x /usr/local/bin/vpn-watchdog
-
-# Add cron job to check VPN every 2 minutes
-if ! crontab -l 2>/dev/null | grep -q vpn-watchdog; then
-  (crontab -l 2>/dev/null; echo "*/2 * * * * /usr/local/bin/vpn-watchdog") | crontab -
-fi
-
-################################################################################
-# 8. FINAL SETUP & REBOOT                                                      #
-################################################################################
-
-echo "[INFO] Setup complete! Rebooting..."
-sleep 3
-reboot
-#!/usr/bin/env bash
-set -euo pipefail
-
-################################################################################
-# Raspberry Pi - WiFi Access Point + WireGuard VPN Client                      #
-# ---------------------------------------------------------------------------- #
-# This script turns a Raspberry Pi into:                                       #
-# - A Wi-Fi Access Point (AP) on wlan0                                         #
-# - A VPN client, routing all traffic through a WireGuard VPS                  #
-# - A NAT Gateway for forwarding traffic from connected devices                #
-# ---------------------------------------------------------------------------- #
-# After execution, the Raspberry Pi will reboot.                               #
-################################################################################
-
-# Ensure script runs as root
-if [[ $(id -u) -ne 0 ]]; then
-  echo "[ERROR] Please run this script as root (sudo su)."
-  exit 1
-fi
-
-echo "[INFO] Updating system and installing required packages..."
-apt update && apt full-upgrade -y
-apt install -y git curl hostapd dnsmasq wireguard
-
-# Install iptables and openresolv if missing
-if ! command -v iptables &> /dev/null; then
-  echo "[INFO] Installing iptables..."
-  apt install -y iptables iptables-persistent
-fi
-
-if ! command -v resolvconf &> /dev/null; then
-  echo "[INFO] Installing openresolv (resolvconf)..."
-  apt install -y openresolv
-fi
-
-################################################################################
-# 1. SYSTEM CONFIGURATION (HOSTNAME & WIFI COUNTRY)                            #
-################################################################################
-
-echo "[INFO] Setting hostname and Wi-Fi country..."
-hostnamectl set-hostname raspberry-vpn
-echo "raspberry-vpn" > /etc/hostname
-echo "127.0.1.1 raspberry-vpn" >> /etc/hosts
-
-# Set Wi-Fi country
-echo "country=FR" >> /etc/wpa_supplicant/wpa_supplicant.conf
-
-################################################################################
-# 2. SET STATIC IP ON WLAN0                                                    #
-################################################################################
-
-echo "[INFO] Setting static IP for wlan0..."
-cat <<EOF > /etc/dhcpcd.conf
-interface wlan0
-    static ip_address=192.168.50.1/24
-    nohook wpa_supplicant
-EOF
-
-################################################################################
-# 3. CONFIGURE WI-FI ACCESS POINT                                              #
-################################################################################
-
-echo "[INFO] Configuring Wi-Fi Access Point..."
-systemctl unmask hostapd
-systemctl enable hostapd
-
-# Configure hostapd (Wi-Fi AP settings)
-cat <<EOF > /etc/hostapd/hostapd.conf
-interface=wlan0
-ssid=MySecureAP
-hw_mode=g
-channel=6
-wpa=2
-wpa_passphrase=ChangeThisPassword!
-wpa_key_mgmt=WPA-PSK
-rsn_pairwise=CCMP
-country_code=FR
-EOF
-
-# Configure dnsmasq (DHCP for AP clients)
-mv /etc/dnsmasq.conf /etc/dnsmasq.conf.bak || true
-cat <<EOF > /etc/dnsmasq.conf
-interface=wlan0
-dhcp-range=192.168.50.10,192.168.50.150,255.255.255.0,24h
-dhcp-option=3,192.168.50.1
-dhcp-option=6,8.8.8.8,1.1.1.1
-EOF
-
-################################################################################
-# 4. ENABLE NAT & IP FORWARDING                                                #
-################################################################################
-
-echo "[INFO] Enabling IP forwarding and setting iptables rules..."
-echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-ip_forward.conf
-sysctl --system
-
-# Set iptables rules for NAT
-iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
-iptables -A FORWARD -i wlan0 -o eth0 -m state --state RELATED,ESTABLISHED -j ACCEPT
-iptables -A FORWARD -i eth0 -o wlan0 -j ACCEPT
-
-# Save iptables rules
-iptables-save > /etc/iptables.up.rules
-
-# Restore iptables on boot
-cat <<EOF > /etc/network/if-pre-up.d/iptables
-#!/bin/sh
-/sbin/iptables-restore < /etc/iptables.up.rules
-EOF
-chmod +x /etc/network/if-pre-up.d/iptables
-
-################################################################################
-# 5. CONFIGURE WIREGUARD CLIENT                                                #
-################################################################################
-
-echo "[INFO] Configuring WireGuard client..."
-mkdir -p /etc/wireguard && chmod 700 /etc/wireguard
-cd /etc/wireguard
-umask 077
-
-# Generate private key if not exists
-if [[ ! -f client_private.key ]]; then
-  wg genkey | tee client_private.key | wg pubkey > client_public.key
-fi
-CLIENT_PRIVATE_KEY="$(cat client_private.key)"
-
-cat <<EOF > /etc/wireguard/wg0.conf
-[Interface]
-PrivateKey = $CLIENT_PRIVATE_KEY
-Address = 10.0.0.2/24
-DNS = 8.8.8.8
-
-[Peer]
-PublicKey = ReplaceWithYourVPSPublicKey
-Endpoint = ReplaceWithYourVPSIP:51820
-AllowedIPs = 0.0.0.0/0
-PersistentKeepalive = 25
-EOF
-
-chmod 600 /etc/wireguard/wg0.conf
-
-################################################################################
-# 6. ENABLE SERVICES                                                           #
-################################################################################
-
-echo "[INFO] Enabling and starting services..."
-systemctl enable dnsmasq
-systemctl enable hostapd
-systemctl restart dnsmasq
-systemctl restart hostapd
-
-# Enable and start WireGuard
-systemctl enable wg-quick@wg0
-systemctl start wg-quick@wg0
-
-################################################################################
-# 7. VPN WATCHDOG (AUTO-RESTART VPN IF DOWN)                                   #
-################################################################################
-
-echo "[INFO] Creating VPN watchdog script..."
-cat <<EOF > /usr/local/bin/vpn-watchdog
-#!/bin/bash
-if ! ping -c 3 10.0.0.1 &> /dev/null; then
-    systemctl restart wg-quick@wg0
-    logger "VPN Watchdog: Tunnel restarted"
-fi
-EOF
-chmod +x /usr/local/bin/vpn-watchdog
-
-# Add cron job to check VPN every 2 minutes
-if ! crontab -l 2>/dev/null | grep -q vpn-watchdog; then
-  (crontab -l 2>/dev/null; echo "*/2 * * * * /usr/local/bin/vpn-watchdog") | crontab -
-fi
-
-################################################################################
-# 8. FINAL SETUP & REBOOT                                                      #
+# 7. FINAL SETUP & REBOOT                                                      #
 ################################################################################
 
 echo "[INFO] Setup complete! Rebooting..."
