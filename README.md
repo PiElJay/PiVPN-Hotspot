@@ -189,10 +189,6 @@ Ensure POSTROUTING MASQUERADE is applied.
 
     WireGuard – Lightweight and secure VPN technology.
     Raspberry Pi Foundation – For the amazing Raspberry Pi ecosystem.
-    UFW (Uncomplicated Firewall) – Simple yet powerful firewall tool.
-
-🎉 Enjoy Secure Browsing via Your Own VPN Access Point! 🚀
-
-🔗 GitHub Repository: Tunnel-Gateway
-
+    A combination of LLM(CGPT,DEEPSEEK) that helped tune and refine the script
+    
 🔥 If you like it, give it a ⭐ on GitHub! 🚀
