@@ -245,5 +245,5 @@ This project turns a Raspberry Pi into a Wi-Fi Access Point that tunnels all its
 ```
 🔥 If you like it, give the repo a small ⭐, if you don't like it give it anyway ! 
 
-![Risitas](https://media1.giphy.com/media/v1.Y2lkPTc5MGI3NjExb3pwOGJjM25ya3VzMzM5azgxMmtvY2ZqYndkMGVrYWs4cHNuNDJoNSZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/frGReyWTKNZVHmzh2p/giphy.gif)
+![Risitas](https://media1.giphy.com/media/v1.Y2lkPTc5MGI3NjExb3pwOGJjM25ya3VzMzM5azgxMmtvY2ZqYndkMGVrYWs4cHNuNDJoNSZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/frGReyWTKNZVHmzh2p/giphy.gif](https://i.giphy.com/frGReyWTKNZVHmzh2p.webp)
 
