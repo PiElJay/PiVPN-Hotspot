@@ -1,154 +1,186 @@
 #!/usr/bin/env bash
+# WireGuard automated installer – Ubuntu 24.04 (Noble)
+# Author: PiEljay
+# Version: 1.2 – 2025-05-22
 set -euo pipefail
+IFS=$'\n\t'
 
-################################################################################
-# WIREGUARD SERVER SETUP ON UBUNTU 24.04 (NOBLE)                               #
-# ---------------------------------------------------------------------------- #
-# This script sets up a WireGuard VPN server on a VPS running Ubuntu 24.04.    #
-# - Uses UFW as the firewall, enabling NAT and IP forwarding.                  #
-# - Network interface: enx5 (replace with your actual interface).               #
-# - Public IP: 209.227.234.177 (update accordingly).                            #
-# - Full tunnel configuration (AllowedIPs = 0.0.0.0/0).                         #
-# - Includes a watchdog to monitor client handshakes.                          #
-################################################################################
+###############################################################################
+#                              Utility functions                              #
+###############################################################################
+die() { echo "[FATAL] $*" >&2; exit 1; }
 
-# ----- REQUIRE ROOT PRIVILEGES -----
-if [[ $(id -u) -ne 0 ]]; then
-  echo "[ERROR] Please run this script as root (sudo su)."
-  exit 1
-fi
+confirm() {
+  local msg=$1
+  local yn
+  read -rp "$msg [y/N] " yn
+  [[ ${yn,,} == y ]]
+}
 
-echo "[INFO] Updating system and installing required packages..."
-apt update && apt upgrade -y
+prompt() {
+  # $1 = var name, $2 = prompt, $3 = default, $4 = regex validator
+  local __var=$1 question=$2 def=$3 re=${4:-'.+'} val
+  while true; do
+    read -rp "$question [$def]: " val
+    val=${val:-$def}
+    [[ $val =~ $re ]] || { echo "Invalid format."; continue; }
+    confirm "You entered '$val'. Confirm?" && break
+  done
+  printf -v "$__var" %s "$val"
+}
 
-echo "[INFO] Installing WireGuard and UFW..."
-apt install -y wireguard ufw
+backup() { local f=$1; cp -a "$f" "${f}.bak.$(date +%s)"; }
 
-################################################################################
-# 1. ENABLE IP FORWARDING & CONFIGURE UFW NAT
-################################################################################
-echo "[INFO] Enabling net.ipv4.ip_forward for full tunnel..."
-if ! grep -q '^net.ipv4.ip_forward=1' /etc/sysctl.conf; then
-  echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
-fi
+cleanup() {
+  echo "[WARN] Aborted – rolling back."
+  [[ -f "$UFW_BEFORE".backup ]] && mv "$UFW_BEFORE".backup "$UFW_BEFORE"
+  systemctl is-active --quiet wg-quick@wg0 && wg-quick down wg0 || true
+}
+trap cleanup ERR INT
+
+###############################################################################
+#                           Interactive parameter set                         #
+###############################################################################
+echo "=== WireGuard server quick-installer ==="
+
+prompt EXT_IF   "External network interface"               "$(ip route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++)if($i=="dev")print $(i+1); exit}')" '^[a-zA-Z0-9]+$'
+prompt PUBLIC_IP "Public IPv4 address of this host"         "$(curl -s https://api64.ipify.org)"            '^[0-9.]+$'
+prompt WG_PORT   "UDP port to listen on"                    "51820"                                         '^[0-9]{1,5}$'
+prompt WG_ADDR4  "Server VPN address (CIDR)"                "10.0.0.1/24"                                   '^[0-9./]+$'
+prompt WG_ADDR6  "Add IPv6 subnet? (empty to skip)"         ""                                              '^([a-fA-F0-9:/]+(/[0-9]{1,3})?)?$'
+ENABLE_IPV6=false; [[ -n $WG_ADDR6 ]] && ENABLE_IPV6=true
+prompt PEER_KEY  "First peer public key (can add later)"    ""                                              '^[A-Za-z0-9+/]{43}=$'
+
+echo
+confirm "Proceed with installation?" || die "Cancelled by user."
+
+###############################################################################
+#                         Package installation & update                       #
+###############################################################################
+echo "[INFO] Updating packages..."
+apt update -y
+apt install -y wireguard wireguard-tools ufw curl
+
+###############################################################################
+#                              Sysctl & firewall                              #
+###############################################################################
+echo "[INFO] Enabling IP forwarding..."
+sysctl_flags=(
+  "net.ipv4.ip_forward=1"
+)
+$ENABLE_IPV6 && sysctl_flags+=("net.ipv6.conf.all.forwarding=1")
+for s in "${sysctl_flags[@]}"; do
+  grep -q "^$s" /etc/sysctl.conf || echo "$s" >> /etc/sysctl.conf
+done
 sysctl -p
 
-# Configure NAT (MASQUERADE) in UFW by modifying /etc/ufw/before.rules
-echo "[INFO] Setting up NAT in /etc/ufw/before.rules (MASQUERADE on enx5)"
+echo "[INFO] Configuring UFW..."
+ufw allow 22/tcp
+ufw allow "${WG_PORT}"/udp
+ufw --force enable
 
 UFW_BEFORE="/etc/ufw/before.rules"
-BACKUP_FILE="/etc/ufw/before.rules.bak.$(date +%Y%m%d%H%M%S)"
+backup "$UFW_BEFORE"; mv "$UFW_BEFORE" "$UFW_BEFORE".backup
+cat > "$UFW_BEFORE" <<EOF
+# START WireGuard NAT section
+*nat
+:POSTROUTING ACCEPT [0:0]
+-A POSTROUTING -o $EXT_IF -j MASQUERADE
+COMMIT
+# END WireGuard NAT section
+$(cat "$UFW_BEFORE".backup)
+EOF
 
-# Backup existing rules before modifying
-cp "$UFW_BEFORE" "$BACKUP_FILE"
+# Allow routed traffic back out
+ufw route allow in on wg0 out on "$EXT_IF" to any
+$ENABLE_IPV6 && ufw route allow in on wg0 out on "$EXT_IF" to any proto ipv6
 
-# If NAT rule is missing, add it at the beginning of the file
-if ! grep -q 'POSTROUTING -o enx5 -j MASQUERADE' "$UFW_BEFORE"; then
-  sed -i '1 i\
-*nat\n:POSTROUTING ACCEPT [0:0]\n-A POSTROUTING -o enx5 -j MASQUERADE\nCOMMIT\n' "$UFW_BEFORE"
-fi
+###############################################################################
+#                              Key generation                                 #
+###############################################################################
+echo "[INFO] Generating server keypair..."
+install -o root -g root -m 700 -d /etc/wireguard
+cd /etc/wireguard
+umask 077
+SERVER_PRIV=$(wg genkey)
+SERVER_PUB=$(sed 's/$/\n/' <<<"$SERVER_PRIV" | wg pubkey)
 
-################################################################################
-# 2. CONFIGURE UFW FIREWALL RULES
-################################################################################
-echo "[INFO] Configuring UFW: opening WireGuard (51820/udp) and SSH (22/tcp)"
-ufw allow 22/tcp || true      # Ensure SSH is always accessible
-ufw allow 51820/udp || true   # Allow WireGuard VPN traffic
-ufw enable
-ufw status verbose
-
-################################################################################
-# 3. GENERATE SERVER KEYS & CONFIGURE /etc/wireguard/wg0.conf
-################################################################################
-echo "[INFO] Generating WireGuard keys (server_private.key, server_public.key)"
-cd /etc/wireguard || exit 1
-umask 077  # Secure permissions
-
-# Generate private & public keys if not already present
-if [[ ! -f server_private.key ]]; then
-  wg genkey | tee server_private.key | wg pubkey > server_public.key
-fi
-SERVER_PRIVATE_KEY=$(cat server_private.key)
-SERVER_PUBLIC_KEY=$(cat server_public.key)
-
-echo "[INFO] Creating /etc/wireguard/wg0.conf configuration file"
-cat <<EOF > /etc/wireguard/wg0.conf
+###############################################################################
+#                           Write wg0.conf safely                             #
+###############################################################################
+echo "[INFO] Creating wg0.conf..."
+cat > /etc/wireguard/wg0.conf <<EOF
 [Interface]
-Address = 10.0.0.1/24
-ListenPort = 51820
-PrivateKey = $SERVER_PRIVATE_KEY
-# Uncomment to let WireGuard dynamically save peers
-# SaveConfig = true
+Address = $WG_ADDR4${ENABLE_IPV6:+,$WG_ADDR6}
+ListenPort = $WG_PORT
+PrivateKey = $SERVER_PRIV
+SaveConfig = true
 
-# PostUp/PostDown iptables rules (not needed if using UFW, but kept as fallback)
-# PostUp   = iptables -t nat -A POSTROUTING -o enx5 -j MASQUERADE
-# PostDown = iptables -t nat -D POSTROUTING -o enx5 -j MASQUERADE
-
-# EXAMPLE CLIENT PEER (Replace with your Raspberry Pi's public key)
+# First peer (optional)
+$( [[ -n $PEER_KEY ]] && cat <<PEER
 [Peer]
-PublicKey = uGsP3Es3SCTtElTS8s99CQ2RIJn4i8d2jgom6q1IVEg=
-AllowedIPs = 10.0.0.2/32
+PublicKey = $PEER_KEY
+AllowedIPs = ${WG_ADDR4%.*}.2/32${ENABLE_IPV6:+,${WG_ADDR6%::*}::2/128}
+PersistentKeepalive = 25
+PEER
+)
+EOF
+chmod 600 /etc/wireguard/wg0.conf
+
+###############################################################################
+#                    Enable service & persistent watchdog                     #
+###############################################################################
+systemctl enable --now wg-quick@wg0
+
+cat > /etc/systemd/system/wg-watchdog.service <<EOF
+[Unit]
+Description=WireGuard handshake watchdog
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/wg-watchdog
 EOF
 
-# Secure file permissions
-chmod 600 /etc/wireguard/*
+cat > /etc/systemd/system/wg-watchdog.timer <<EOF
+[Unit]
+Description=Run WireGuard watchdog every 2 min
 
-################################################################################
-# 4. ENABLE & START WIREGUARD
-################################################################################
-echo "[INFO] Enabling WireGuard service to start on boot"
-systemctl enable wg-quick@wg0
-wg-quick up wg0
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=2min
+Unit=wg-watchdog.service
 
-echo "[INFO] WireGuard status after startup:"
-wg
+[Install]
+WantedBy=timers.target
+EOF
 
-################################################################################
-# 5. WATCHDOG: MONITOR CLIENT HANDSHAKES
-################################################################################
-echo "[INFO] Setting up a WireGuard watchdog script..."
-
-WATCHDOG_SCRIPT="/usr/local/bin/wg-watchdog"
-
-cat <<'EOF' > "$WATCHDOG_SCRIPT"
+cat > /usr/local/bin/wg-watchdog <<'EOF'
 #!/usr/bin/env bash
-# Simple watchdog script to monitor client handshake.
-# Requires PersistentKeepalive > 0 on the client.
-# If no handshake for more than 120s, restart wg0.
-
-PEER_PUBKEY="<CLIENT_PUBLIC_KEY>"  # Replace with actual client public key
-LAST_HANDSHAKE=$(wg show wg0 latest-handshakes | grep "$PEER_PUBKEY" | awk '{print $2}')
-CURRENT_TIME=$(date +%s)
-
-if [[ -n "$LAST_HANDSHAKE" ]]; then
-  DIFF=$(( CURRENT_TIME - LAST_HANDSHAKE ))
-  if [[ $DIFF -gt 120 ]]; then
-    logger "wg-watchdog: No handshake for $DIFF seconds. Restarting wg0."
-    systemctl restart wg-quick@wg0
-  fi
-fi
+set -euo pipefail
+PEERS=$(wg show wg0 dump | awk '$5==0{print $1}')
+for p in $PEERS; do
+  logger -p notice "wg-watchdog: peer $p down >120 s, removing"
+  wg set wg0 peer "$p" remove
+done
 EOF
+chmod +x /usr/local/bin/wg-watchdog
+systemctl daemon-reload
+systemctl enable --now wg-watchdog.timer
 
-# Make the watchdog script executable
-chmod +x "$WATCHDOG_SCRIPT"
+###############################################################################
+#                                   Output                                    #
+###############################################################################
+cat <<EOF
 
-# Add a cron job to check VPN status every 2 minutes
-if ! crontab -l 2>/dev/null | grep -q wg-watchdog; then
-  (crontab -l 2>/dev/null; echo "*/2 * * * * $WATCHDOG_SCRIPT") | crontab -
-fi
-
-################################################################################
-# 6. FINAL INSTRUCTIONS
-################################################################################
-echo "-----------------------------------------------------"
-echo "[INFO] INSTALLATION COMPLETE!"
-echo "-----------------------------------------------------"
-echo "1. Server Public Key (for clients to use):"
-echo "$SERVER_PUBLIC_KEY"
-echo "2. Replace <CLIENT_PUBLIC_KEY> in /etc/wireguard/wg0.conf and in $WATCHDOG_SCRIPT,"
-echo "   then restart WireGuard with: wg-quick down wg0 && wg-quick up wg0"
-echo "3. On your client (Raspberry Pi), configure wg0.conf with:"
-echo "   Endpoint = 209.227.234.177:51820"
-echo "   PublicKey = $SERVER_PUBLIC_KEY"
-echo "4. Done! If additional NAT is required, UFW is already handling MASQUERADE on enx5."
-echo "-----------------------------------------------------"
+========================================================
+        WireGuard installation complete
+========================================================
+Server public key : $SERVER_PUB
+Config file       : /etc/wireguard/wg0.conf
+Watchdog          : systemd timer (wg-watchdog.timer)
+Add a new client  : sudo wg genkey | tee /etc/wireguard/<name>.priv | wg pubkey > /etc/wireguard/<name>.pub
+Then run          : sudo wg set wg0 peer <client_pub> allowed-ips <next_IP>/32
+========================================================
+EOF
