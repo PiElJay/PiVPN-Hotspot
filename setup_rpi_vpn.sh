@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Raspberry Pi Wi-Fi AP + WireGuard client bootstrap
-# Author: <you>
+# Author: PiEljay
 # Version: 1.3 – 2025-05-22
 set -euo pipefail
 IFS=$'\n\t'
+NAT_IF=""
 
 ################################################################################
 #                               Utility helpers                                #
@@ -25,9 +26,16 @@ prompt() {
 
 cleanup() {
   echo "[WARN] Aborted – rolling back."
-  [[ -f /etc/dhcpcd.conf.bak* ]] && mv /etc/dhcpcd.conf.bak* /etc/dhcpcd.conf
+  shopt -s nullglob
+  local bak=(/etc/dhcpcd.conf.bak.*)
+  if (( ${#bak[@]} )); then
+    mv "${bak[-1]}" /etc/dhcpcd.conf
+  fi
+  shopt -u nullglob
   systemctl stop hostapd dnsmasq || true
-  iptables -t nat -D POSTROUTING -s ${WIFI_PREFIX}.0/24 -o "$NAT_IF" -j MASQUERADE 2>/dev/null || true
+  if [[ -n ${NAT_IF:-} ]]; then
+    iptables -t nat -D POSTROUTING -s ${WIFI_PREFIX}.0/24 -o "$NAT_IF" -j MASQUERADE 2>/dev/null || true
+  fi
 }
 trap cleanup ERR INT
 

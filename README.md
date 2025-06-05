@@ -79,11 +79,12 @@ sudo ./setup_rpi_vpn.sh
 ✅ Enables IP-forwarding & NAT (persisted with iptables-persistent)
 ✅ Uses systemd-restart semantics—no separate watchdog needed 🎉
 🔗 Parameter Cross-Check (don’t mix these up!)
-VPS installer prompt	Pi installer prompt	Value that must match
-Public IPv4 / DNS	part of WG_ENDPOINT	VPS address
-UDP port (WG_PORT)	WG_ENDPOINT suffix	e.g. 51820
-Server VPN network (WG_ADDR4, default 10.0.0.1/24)	VPN_SUBNET (10.0.0.0/24)	Same /24
-Optional first peer pubkey	auto-generated CLIENT_PUB	Paste into VPS (now or later)
+| VPS installer prompt | Pi installer prompt | Value that must match |
+|----------------------|---------------------|-----------------------|
+| Public IPv4 / DNS | part of WG_ENDPOINT | VPS address |
+| UDP port (WG_PORT) | WG_ENDPOINT suffix | e.g. 51820 |
+| Server VPN network (WG_ADDR4, default 10.0.0.1/24) | VPN_SUBNET (e.g., 10.0.0.0/24) | same /24 |
+| Optional first peer pubkey | auto-generated CLIENT_PUB | Paste into VPS (now or later) |
 ⚙️ Configuration Details
 📄 WireGuard – server (/etc/wireguard/wg0.conf)
 
@@ -178,7 +179,7 @@ sudo wg set wg0 peer <NEW_PUB> allowed-ips 10.0.0.<N>/32
 
 ## TL;DR - Quick Start & Key Info
 
-This project turns a Raspberry Pi into a Wi-Fi Access Point that tunnels all its traffic through a WireGuard VPN on your own VPS. Any device connecting to the Pi's Wi-Fi will appear to be Browse from the VPS's location.
+This project turns a Raspberry Pi into a Wi-Fi Access Point that tunnels all its traffic through a WireGuard VPN on your own VPS. Any device connecting to the Pi's Wi-Fi will appear to be browsing from the VPS's location.
 
 ### 🚀 What it Does:
 
@@ -246,5 +247,7 @@ This project turns a Raspberry Pi into a Wi-Fi Access Point that tunnels all its
 🔥 If you like it, give the repo a small ⭐, if you don't like it give it anyway ! 
 
 ![Risitas](https://i.giphy.com/1j2QnGEM2QsJG.webp)
+
+```
 
 
