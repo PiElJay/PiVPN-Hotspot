@@ -8,16 +8,16 @@ This project turns a Raspberry Pi into:
 
 ✅ **A Wi-Fi Access Point** (`wlan0`), letting nearby devices connect.  
 ✅ **A WireGuard VPN Client**, sending all traffic to a remote VPS.  
-✅ **A NAT Gateway**, so every Wi-Fi client’s traffic is tunneled.  
+✅ **A NAT Gateway**, so every Wi-Fi client's traffic is tunneled.  
 
 🔹 **The result?**  
-Any device that joins the Pi’s network browses the Internet **as if it were sitting behind the VPS**.
+Any device that joins the Pi's network browses the Internet **as if it were sitting behind the VPS**.
 
 ---
 
 ## 📌 Use Cases  
 
-| ✅ | Scenario | Why it rocks |
+| ✅ | Scenario | Why it rocks |
 |----|----------|-------------|
 | ✔️ | **Personal VPN gateway** | Keep full control of keys & logs (note: fixed VPS IP ≠ anonymity like Tor). |
 | ✔️ | **Remote-work freedom** | Appear in another country without commercial VPN fingerprints. |
@@ -34,7 +34,7 @@ Any device that joins the Pi’s network browses the Internet **as if it were si
 * **Tech:** WireGuard, UFW  
 * **Role:**  
   * Accept VPN clients  
-  * NAT **wg0 → `<EXT_IF>`**  
+  * NAT **wg0** traffic **→ `<EXT_IF>`**  
   * Forward traffic to the Internet  
 
 ### 🔹 Raspberry Pi  
@@ -45,9 +45,10 @@ Any device that joins the Pi’s network browses the Internet **as if it were si
   * NAT **LAN → wg0**  
   * Tunnel everything through the VPS  
 
+```
 Wi-Fi clients ─► wlan0 ─► NAT ─► wg0 (Pi) ────────────► wg0 (VPS) ─► NAT ─► Internet
-🔒 🔒
-
+                                    🔒                      🔒
+```
 
 ---
 
@@ -59,50 +60,65 @@ Wi-Fi clients ─► wlan0 ─► NAT ─► wg0 (Pi) ────────�
 wget https://raw.githubusercontent.com/PiElJay/Tunnel-Gateway/refs/heads/main/wg_server_setup.sh -O wg_server_install.sh
 chmod +x wg_server_install.sh
 sudo ./wg_server_install.sh
+```
 
-🔹 What the script does
-✅ Installs WireGuard & UFW
-✅ Enables NAT & IP-forwarding
-✅ Generates server keys and /etc/wireguard/wg0.conf
-✅ Starts wg-quick@wg0 and a handshake-watchdog (systemd timer)
+🔹 **What the script does**
+* ✅ Installs WireGuard & UFW
+* ✅ Enables NAT & IP-forwarding (only for VPN traffic)
+* ✅ Generates server keys and `/etc/wireguard/wg0.conf`
+* ✅ Starts `wg-quick@wg0` and a handshake-watchdog (systemd timer)
 
-📢 Note the VPS public key printed at the end—you’ll need it for the Pi.
-2️⃣ Raspberry Pi (Client + AP)
+📢 **Note the VPS public key printed at the end—you'll need it for the Pi.**
 
+### 2️⃣ Raspberry Pi (Client + AP)
+
+```bash
 wget https://raw.githubusercontent.com/PiElJay/Tunnel-Gateway/refs/heads/main/setup_rpi_vpn.sh -O setup_rpi_vpn.sh
 chmod +x setup_rpi_vpn.sh
 sudo ./setup_rpi_vpn.sh
+```
 
-🔹 What the script does
-✅ Builds a Wi-Fi AP with hostapd & dnsmasq
-✅ Generates client keys and connects to the VPS via WireGuard
-✅ Enables IP-forwarding & NAT (persisted with iptables-persistent)
-✅ Uses systemd-restart semantics—no separate watchdog needed 🎉
-🔗 Parameter Cross-Check (don’t mix these up!)
-VPS installer prompt	Pi installer prompt	Value that must match
-Public IPv4 / DNS	part of WG_ENDPOINT	VPS address
-UDP port (WG_PORT)	WG_ENDPOINT suffix	e.g. 51820
-Server VPN network (WG_ADDR4, default 10.0.0.1/24)	VPN_SUBNET (10.0.0.0/24)	Same /24
-Optional first peer pubkey	auto-generated CLIENT_PUB	Paste into VPS (now or later)
-⚙️ Configuration Details
-📄 WireGuard – server (/etc/wireguard/wg0.conf)
+🔹 **What the script does**
+* ✅ Builds a Wi-Fi AP with hostapd & dnsmasq
+* ✅ Generates client keys and connects to the VPS via WireGuard
+* ✅ Enables IP-forwarding & NAT (persisted with iptables-persistent)
+* ✅ Configures chrony for VPN-friendly time synchronization
+* ✅ Uses systemd-restart semantics—no separate watchdog needed 🎉
 
+### 🔗 Parameter Cross-Check (don't mix these up!)
+
+| VPS installer prompt | Pi installer prompt | Value that must match |
+|---------------------|--------------------|-----------------------|
+| Public IPv4 / DNS | part of WG_ENDPOINT | VPS address |
+| UDP port (WG_PORT) | WG_ENDPOINT suffix | e.g. 51820 |
+| Server VPN network (WG_ADDR4, default 10.0.0.1/24) | VPN_SUBNET (10.0.0.0/24) | Same /24 |
+| Optional first peer pubkey | auto-generated CLIENT_PUB | Paste into VPS (now or later) |
+
+---
+
+## ⚙️ Configuration Details
+
+### 📄 WireGuard – server (`/etc/wireguard/wg0.conf`)
+
+```ini
 [Interface]
 Address     = 10.0.0.1/24
 ListenPort  = 51820
 PrivateKey  = <SERVER_PRIVATE_KEY>
-SaveConfig  = true   # default in the script
+SaveConfig  = true   # Runtime changes auto-save
 
 [Peer]
 PublicKey   = <CLIENT_PUBLIC_KEY>
 AllowedIPs  = 10.0.0.2/32
 PersistentKeepalive = 25
+```
 
-📄 WireGuard – Raspberry Pi (/etc/wireguard/wg0.conf)
+### 📄 WireGuard – Raspberry Pi (`/etc/wireguard/wg0.conf`)
 
+```ini
 [Interface]
 PrivateKey = <CLIENT_PRIVATE_KEY>
-Address    = 10.0.0.2/24
+Address    = 10.0.0.2/32
 DNS        = 9.9.9.9
 
 [Peer]
@@ -110,87 +126,108 @@ PublicKey  = <SERVER_PUBLIC_KEY>
 Endpoint   = <VPS_IP>:51820
 AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25
+```
 
-📡 Wi-Fi AP
+### 📡 Wi-Fi AP
 
-    SSID & password: /etc/hostapd/hostapd.conf
+* **SSID & password:** `/etc/hostapd/hostapd.conf`
+* **DHCP & DNS:** `/etc/dnsmasq.conf`
 
-    DHCP & DNS: /etc/dnsmasq.conf
-
+```bash
 sudo nano /etc/hostapd/hostapd.conf   # edit ssid= / wpa_passphrase=
 sudo systemctl restart hostapd
+```
 
-🔥 Firewall & NAT
-🔹 VPS (UFW)
+---
 
+## 🔥 Firewall & NAT
+
+### 🔹 VPS (UFW)
+
+```bash
 sudo ufw status verbose
+```
 
 Expected rules:
-
+```
 51820/udp        ALLOW Anywhere
 22/tcp           ALLOW Anywhere
 wg0 on <ext_if>  ALLOW FWD  (route rule)
+```
 
-🔹 Raspberry Pi (iptables)
+### 🔹 Raspberry Pi (iptables)
 
+```bash
 sudo iptables -t nat -L POSTROUTING -v -n
+```
 
-Expected (out-iface usually wg0):
-
+Expected (out-iface should be wg0):
+```
 Chain POSTROUTING (policy ACCEPT)
 pkts bytes target     prot opt in  out source            destination
 12   860  MASQUERADE  all  --  any wg0  192.168.50.0/24  anywhere
+```
 
-    Why two MASQUERADES?
+**Why two MASQUERADES?**
+* **Pi:** LAN → wg0 so Wi-Fi clients share one VPN IP.
+* **VPS:** wg0 → EXT_IF so VPN traffic exits with the VPS public IP.
 
-        Pi: LAN → wg0 so Wi-Fi clients share one VPN IP.
+---
 
-        VPS: wg0 → EXT_IF so all peer traffic exits with the VPS public IP.
+## 🔍 Troubleshooting
 
-🔍 Troubleshooting
-❌ Symptom	Check	Fix
-No Internet for Wi-Fi clients	sysctl net.ipv4.ip_forward → should be 1	echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-ip_forward.conf && sysctl --system
-No handshake visible	wg show on Pi & VPS	open UDP port in cloud firewall; verify keys & subnet match
-NAT rule missing	iptables -t nat -L POSTROUTING -v -n	Ensure a MASQUERADE rule exists and the OUT iface matches wg0 (or the default route)
-🎯 Next Steps
+| ❌ Symptom | Check | Fix |
+|------------|-------|-----|
+| No Internet for Wi-Fi clients | `sysctl net.ipv4.ip_forward` → should be 1 | `echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-ip_forward.conf && sysctl --system` |
+| No handshake visible | `wg show` on Pi & VPS | Open UDP port in cloud firewall; verify keys & subnet match |
+| NAT rule missing | `iptables -t nat -L POSTROUTING -v -n` | Ensure a MASQUERADE rule exists and the OUT iface is wg0 |
+| Time sync issues | `chronyc sources` | Check `/etc/chrony/sources.d/vpn.sources` exists |
 
-🔹 Security hardening: rotate the Wi-Fi passphrase regularly.
-🔹 Add more peers:
+---
 
+## 🎯 Next Steps
+
+🔹 **Security hardening:** rotate the Wi-Fi passphrase regularly.
+
+🔹 **Add more peers:**
+```bash
 # on VPS
 sudo wg set wg0 peer <NEW_PUB> allowed-ips 10.0.0.<N>/32
 # with SaveConfig=true the change persists automatically 🎉
+```
 
-🔹 Monitoring: the VPS watchdog timer prunes dead peers automatically.
-📜 License
+🔹 **Monitoring:** the VPS watchdog timer prunes dead peers automatically (>120s no handshake).
 
-📌 MIT License – hack, share and enjoy!
-📢 Credits
+---
 
-    WireGuard – the lean, modern VPN.
+## 📜 License
 
-    Raspberry Pi Foundation – for the tiny powerhouse.
+📌 **MIT License** – hack, share and enjoy!
 
-    ✨ LLMs (ChatGPT, DeepSeek) helped refine these scripts.
+## 📢 Credits
 
+* **Author:** PiElJay
+* **WireGuard** – the lean, modern VPN.
+* **Raspberry Pi Foundation** – for the tiny powerhouse.
+* ✨ **LLMs** (ChatGPT, DeepSeek) helped refine these scripts.
 
 ---
 
 ## TL;DR - Quick Start & Key Info
 
-This project turns a Raspberry Pi into a Wi-Fi Access Point that tunnels all its traffic through a WireGuard VPN on your own VPS. Any device connecting to the Pi's Wi-Fi will appear to be Browse from the VPS's location.
+This project turns a Raspberry Pi into a Wi-Fi Access Point that tunnels all its traffic through a WireGuard VPN on your own VPS. Any device connecting to the Pi's Wi-Fi will appear to browse from the VPS's location.
 
 ### 🚀 What it Does:
 
 * **VPS:** Acts as a WireGuard VPN server.
 * **Raspberry Pi:**
-    1.  Connects to your VPS as a WireGuard client.
-    2.  Creates a new Wi-Fi network (Access Point).
-    3.  Routes all traffic from connected Wi-Fi devices through the VPN.
+    1. Connects to your VPS as a WireGuard client.
+    2. Creates a new Wi-Fi network (Access Point).
+    3. Routes all traffic from connected Wi-Fi devices through the VPN.
 
 ### 🛠️ How to Install (Super Basic):
 
-1.  **On your VPS (Ubuntu 24.04):**
+1. **On your VPS (Ubuntu 24.04):**
     ```bash
     wget https://raw.githubusercontent.com/PiElJay/Tunnel-Gateway/refs/heads/main/wg_server_setup.sh -O wg_server_install.sh
     chmod +x wg_server_install.sh
@@ -198,7 +235,7 @@ This project turns a Raspberry Pi into a Wi-Fi Access Point that tunnels all its
     ```
     * **Note the `Server public key` output at the end.**
 
-2.  **On your Raspberry Pi (Raspberry Pi OS Bookworm):**
+2. **On your Raspberry Pi (Raspberry Pi OS Bookworm):**
     ```bash
     wget https://raw.githubusercontent.com/PiElJay/Tunnel-Gateway/refs/heads/main/setup_rpi_vpn.sh -O setup_rpi_vpn.sh
     chmod +x setup_rpi_vpn.sh
@@ -207,7 +244,7 @@ This project turns a Raspberry Pi into a Wi-Fi Access Point that tunnels all its
     * You'll need the `Server public key` from the VPS step.
     * **Note the `Client public key` output at the end.**
 
-3.  **Back on your VPS:**
+3. **Back on your VPS:**
     * Add the Raspberry Pi's `Client public key` and its assigned VPN IP (e.g., `10.0.0.2/32` if using defaults) to the server's WireGuard configuration:
         ```bash
         sudo wg set wg0 peer <PI_CLIENT_PUBLIC_KEY> allowed-ips <PI_VPN_IP>/32
@@ -237,14 +274,13 @@ This project turns a Raspberry Pi into a Wi-Fi Access Point that tunnels all its
         * `Wi-Fi SSID` (your new Wi-Fi network name)
         * `Wi-Fi password` (for your new Wi-Fi)
         * `Country code` (for Wi-Fi regulations, e.g., `US`, `GB`, `FR`)
-        * `Wi-Fi channel`
+        * `Wi-Fi channel` (1-11 for 2.4GHz, 36/40/44/48/149/153/157/161/165 for 5GHz)
         * `AP IP address` (Pi's IP on the new Wi-Fi LAN, e.g., `192.168.50.1`)
 
 * **Reboot Pi:** A reboot of the Raspberry Pi is recommended after its setup script completes.
 
-```
-🔥 If you like it, give the repo a small ⭐, if you don't like it give it anyway ! 
+---
+
+🔥 **If you like it, give the repo a small ⭐, if you don't like it give it anyway!**
 
 ![Risitas](https://i.giphy.com/1j2QnGEM2QsJG.webp)
-
-
