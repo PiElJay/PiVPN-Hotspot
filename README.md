@@ -209,7 +209,7 @@ sudo wg set wg0 peer <NEW_PUB> allowed-ips 10.0.0.<N>/32
 * **Author:** PiElJay
 * **WireGuard** – the lean, modern VPN.
 * **Raspberry Pi Foundation** – for the tiny powerhouse.
-* ✨ **LLMs** (ChatGPT, DeepSeek) helped refine these scripts.
+* ✨ **LLMs** (ChatGPT, DeepSeek,Claude) helped refine these scripts.
 
 ---
 
