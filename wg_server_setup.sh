@@ -49,7 +49,7 @@ prompt WG_PORT   "UDP port to listen on"                    "51820"             
 prompt WG_ADDR4  "Server VPN address (CIDR)"                "10.0.0.1/24"                                   '^[0-9./]+$'
 prompt WG_ADDR6  "Add IPv6 subnet? (empty to skip)"         ""                                              '^([a-fA-F0-9:/]+(/[0-9]{1,3})?)?$'
 ENABLE_IPV6=false; [[ -n $WG_ADDR6 ]] && ENABLE_IPV6=true
-prompt PEER_KEY  "First peer public key (can add later)"    ""                                              '^[A-Za-z0-9+/]{43}=$'
+prompt PEER_KEY  "First peer public key (can add later)"    ""                                              '^([A-Za-z0-9+/]{43}=)?$'
 
 echo
 confirm "Proceed with installation?" || die "Cancelled by user."
@@ -81,15 +81,22 @@ ufw --force enable
 
 UFW_BEFORE="/etc/ufw/before.rules"
 backup "$UFW_BEFORE"; mv "$UFW_BEFORE" "$UFW_BEFORE".backup
+
+# Extract network part for NAT rule
+WG_NETWORK=$(echo "$WG_ADDR4" | cut -d'/' -f1 | sed 's/\.[0-9]*$/\.0/')
+
 cat > "$UFW_BEFORE" <<EOF
 # START WireGuard NAT section
 *nat
 :POSTROUTING ACCEPT [0:0]
--A POSTROUTING -o $EXT_IF -j MASQUERADE
+-A POSTROUTING -s $WG_NETWORK/24 -o $EXT_IF -j MASQUERADE
 COMMIT
 # END WireGuard NAT section
 $(cat "$UFW_BEFORE".backup)
 EOF
+
+# Reload UFW to apply NAT rules
+ufw reload
 
 # Allow routed traffic back out
 ufw route allow in on wg0 out on "$EXT_IF" to any
@@ -109,6 +116,10 @@ SERVER_PUB=$(sed 's/$/\n/' <<<"$SERVER_PRIV" | wg pubkey)
 #                           Write wg0.conf safely                             #
 ###############################################################################
 echo "[INFO] Creating wg0.conf..."
+
+# Extract network prefix more robustly
+WG_NET_PREFIX=$(echo "$WG_ADDR4" | cut -d'/' -f1 | sed 's/\.[0-9]*$//')
+
 cat > /etc/wireguard/wg0.conf <<EOF
 [Interface]
 Address = $WG_ADDR4${ENABLE_IPV6:+,$WG_ADDR6}
@@ -120,7 +131,7 @@ SaveConfig = true
 $( [[ -n $PEER_KEY ]] && cat <<PEER
 [Peer]
 PublicKey = $PEER_KEY
-AllowedIPs = ${WG_ADDR4%.*}.2/32${ENABLE_IPV6:+,${WG_ADDR6%::*}::2/128}
+AllowedIPs = ${WG_NET_PREFIX}.2/32${ENABLE_IPV6:+,${WG_ADDR6%::*}::2/128}
 PersistentKeepalive = 25
 PEER
 )
@@ -159,10 +170,16 @@ EOF
 cat > /usr/local/bin/wg-watchdog <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-PEERS=$(wg show wg0 dump | awk '$5==0{print $1}')
-for p in $PEERS; do
-  logger -p notice "wg-watchdog: peer $p down >120 s, removing"
-  wg set wg0 peer "$p" remove
+# Get current timestamp
+NOW=$(date +%s)
+# Check for peers with no handshake in last 120 seconds
+wg show wg0 dump | tail -n +2 | while read -r line; do
+  PEER=$(echo "$line" | cut -f1)
+  HANDSHAKE=$(echo "$line" | cut -f5)
+  if [[ $HANDSHAKE -eq 0 ]] || [[ $((NOW - HANDSHAKE)) -gt 120 ]]; then
+    logger -t "wg-watchdog" -p notice "peer $PEER down >120s, removing"
+    wg set wg0 peer "$PEER" remove
+  fi
 done
 EOF
 chmod +x /usr/local/bin/wg-watchdog
@@ -180,6 +197,7 @@ cat <<EOF
 Server public key : $SERVER_PUB
 Config file       : /etc/wireguard/wg0.conf
 Watchdog          : systemd timer (wg-watchdog.timer)
+Note: SaveConfig=true means runtime changes auto-save to wg0.conf
 Add a new client  : sudo wg genkey | tee /etc/wireguard/<name>.priv | wg pubkey > /etc/wireguard/<name>.pub
 Then run          : sudo wg set wg0 peer <client_pub> allowed-ips <next_IP>/32
 ========================================================
