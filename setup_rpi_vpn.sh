@@ -27,7 +27,7 @@ cleanup() {
   echo "[WARN] Aborted – rolling back."
   [[ -f /etc/dhcpcd.conf.bak* ]] && mv /etc/dhcpcd.conf.bak* /etc/dhcpcd.conf
   systemctl stop hostapd dnsmasq || true
-  iptables -t nat -D POSTROUTING -s ${WIFI_PREFIX}.0/24 -o "$NAT_IF" -j MASQUERADE 2>/dev/null || true
+  iptables -t nat -D POSTROUTING -s ${WIFI_PREFIX}.0/24 -o wg0 -j MASQUERADE 2>/dev/null || true
 }
 trap cleanup ERR INT
 
@@ -41,12 +41,14 @@ echo "=== Raspberry Pi WireGuard + Wi-Fi AP installer ==="
 prompt WG_SERVER_PUB "WireGuard server public key"   ""  '^[A-Za-z0-9+/]{43}=$'
 prompt WG_ENDPOINT   "WireGuard server endpoint (IP:port)" "" '^[0-9.]+:[0-9]{1,5}$'
 prompt VPN_SUBNET    "VPN subnet (CIDR)"           "10.0.0.0/24" '^[0-9./]+$'
-VPN_CLIENT_IP="$(sed 's/0\/24/2/' <<<"$VPN_SUBNET")"
+# More robust IP calculation
+VPN_NET_PREFIX=$(echo "$VPN_SUBNET" | cut -d'/' -f1 | sed 's/\.[0-9]*$//')
+VPN_CLIENT_IP="${VPN_NET_PREFIX}.2/32"
 
 prompt WIFI_SSID     "Wi-Fi SSID"                  "MySecureAP"  '^.{1,32}$'
 prompt WIFI_PASS     "Wi-Fi password (8-63 chars)" ""  '^.{8,63}$'
 prompt WIFI_CC       "Country code (ISO-3166-1-alpha-2)" "FR" '^[A-Z]{2}$'
-prompt WIFI_CH       "Wi-Fi channel (1-11 2.4 GHz, 36/40/44/48 5 GHz)" "6" '^(1[0-1]|[1-9]|3[6-8]|4[0]|4[4]|4[8])$'
+prompt WIFI_CH       "Wi-Fi channel (1-11 2.4 GHz, 36/40/44/48/149/153/157/161/165 5 GHz)" "6" '^(1[0-1]|[1-9]|3[6]|4[0]|4[4]|4[8]|14[9]|15[3]|15[7]|16[1]|16[5])$'
 prompt WIFI_IP       "AP IP address"               "192.168.50.1" '^[0-9.]+$'
 
 WIFI_PREFIX=$(cut -d. -f1-3 <<<"$WIFI_IP")
@@ -86,6 +88,17 @@ static ip_address=${WIFI_IP}/24
 nohook wpa_supplicant
 EOF
 systemctl restart dhcpcd
+
+################################################################################
+#                        Chrony configuration for VPN                          #
+################################################################################
+echo "[INFO] Configuring chrony for VPN..."
+mkdir -p /etc/chrony/sources.d/
+cat > /etc/chrony/sources.d/vpn.sources <<EOF
+pool time.cloudflare.com iburst
+server time.google.com iburst
+EOF
+systemctl restart chrony
 
 ################################################################################
 #                              Hostapd setup                                   #
@@ -157,9 +170,16 @@ echo "[INFO] Enabling IP forwarding and NAT..."
 echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-ip_forward.conf
 sysctl --system
 
-NAT_IF=$(ip route | awk '/default/ {print $5; exit}')   # usually wg0 after it’s up
-iptables -t nat -C POSTROUTING -s ${WIFI_PREFIX}.0/24 -o "$NAT_IF" -j MASQUERADE 2>/dev/null || \
-iptables -t nat -A POSTROUTING -s ${WIFI_PREFIX}.0/24 -o "$NAT_IF" -j MASQUERADE
+# Wait for WireGuard to establish connection and update routes
+sleep 3
+# Verify wg0 is up before configuring NAT
+if ! ip link show wg0 &>/dev/null; then
+    die "WireGuard interface wg0 not found"
+fi
+
+# Use wg0 explicitly for NAT since all traffic should go through VPN
+iptables -t nat -C POSTROUTING -s ${WIFI_PREFIX}.0/24 -o wg0 -j MASQUERADE 2>/dev/null || \
+iptables -t nat -A POSTROUTING -s ${WIFI_PREFIX}.0/24 -o wg0 -j MASQUERADE
 iptables-save > /etc/iptables/rules.v4
 systemctl enable netfilter-persistent
 
@@ -179,7 +199,7 @@ cat <<EOF
 Remember to add the client public key & 10.0.0.2/32 to
 your **VPS** server with:
 
-  sudo wg set wg0 peer $CLIENT_PUB allowed-ips $VPN_CLIENT_IP
+  sudo wg set wg0 peer $CLIENT_PUB allowed-ips ${VPN_CLIENT_IP%/*}/32
 
 Then run 'reboot' or power-cycle the Pi.
 ========================================================
